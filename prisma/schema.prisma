@@ -1,0 +1,147 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ========== Core models ==========
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  createdAt    DateTime @default(now())
+
+  decks               Deck[]
+  reviewStates        ReviewState[]
+  passwordResetTokens PasswordResetToken[]
+
+  // gamification
+  profile          UserProfile?
+  xpEvents         XpEvent[]
+  userAchievements UserAchievement[]
+  practiceDays     PracticeDay[] // ← renamed for clarity
+}
+
+model Deck {
+  id          String   @id @default(cuid())
+  userId      String
+  name        String
+  description String?
+  createdAt   DateTime @default(now())
+
+  user  User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  cards Card[]
+
+  @@index([userId])
+}
+
+model Card {
+  id        String   @id @default(cuid())
+  deckId    String
+  front     String
+  back      String
+  createdAt DateTime @default(now())
+
+  deck         Deck          @relation(fields: [deckId], references: [id], onDelete: Cascade)
+  reviewStates ReviewState[]
+
+  @@index([deckId])
+}
+
+model ReviewState {
+  id             String    @id @default(cuid())
+  userId         String
+  cardId         String
+  ease           Float     @default(2.5)
+  intervalDays   Int       @default(0)
+  repetitions    Int       @default(0)
+  dueAt          DateTime
+  lastReviewedAt DateTime?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  card Card @relation(fields: [cardId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, cardId])
+  @@index([userId, dueAt])
+  @@index([cardId])
+}
+
+model PasswordResetToken {
+  id        String   @id @default(cuid())
+  userId    String
+  token     String   @unique
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+// ========== Gamification ==========
+
+model UserProfile {
+  userId   String @id
+  timezone String @default("UTC")
+
+  dailyGoalReviews Int @default(20)
+
+  hearts    Int @default(5)
+  heartsMax Int @default(5)
+
+  streakCurrent Int @default(0)
+  streakLongest Int @default(0)
+
+  lastPracticeCompletedDate DateTime?
+  lastStudyDate             DateTime?
+
+  // NEW:
+  displayName String?
+  avatarSeed  String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model XpEvent {
+  id        String   @id @default(cuid())
+  userId    String
+  amount    Int
+  reason    String
+  meta      String?
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+}
+
+model PracticeDay {
+  id          String    @id @default(cuid())
+  userId      String
+  dateKey     String
+  reviews     Int       @default(0)
+  correct     Int       @default(0)
+  seconds     Int       @default(0)
+  xp          Int       @default(0)
+  completed   Boolean   @default(false)
+  completedAt DateTime?
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, dateKey], name: "userId_dateKey")
+  @@index([userId, dateKey])
+}
+
+model UserAchievement {
+  id       String   @id @default(cuid())
+  userId   String
+  key      String // e.g. "streak_7", "xp_100"
+  earnedAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, key], name: "userId_key")
+}
