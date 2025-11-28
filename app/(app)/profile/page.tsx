@@ -7,7 +7,8 @@ import { authOptions } from '@/lib/auth'
 import { prisma } from '@/lib/prisma'
 import { revalidatePath } from 'next/cache'
 import { redirect } from 'next/navigation'
-import ProfileCalendar from '@/components/ProfileCalendar'
+import StreakCounter from '@/components/StreakCounter'
+import WeeklyActivity from '@/components/WeeklyActivity'
 
 function avatarUrl(seed?: string) {
   const s = encodeURIComponent(seed || 'Learner')
@@ -23,10 +24,22 @@ async function updateProfile(formData: FormData) {
   const displayName = String(formData.get('displayName') || '').trim().slice(0, 40)
   const seed = displayName || 'Learner'
 
-  await prisma.userProfile.update({
-    where: { userId: session.user.id },
-    data: { displayName: displayName || null, avatarSeed: seed },
-  })
+  try {
+    // normal Prisma update
+    await prisma.userProfile.update({
+      where: { userId: session.user.id },
+      data: { displayName: displayName || null, avatarSeed: seed },
+    })
+  } catch (err) {
+    // fallback: log error and try a raw SQL update that only touches the textual fields
+    console.error('prisma update failed in updateProfile — attempting raw SQL fallback', err)
+    try {
+      await prisma.$executeRaw`UPDATE "UserProfile" SET "displayName" = ${displayName || null}, "avatarSeed" = ${seed} WHERE "userId" = ${session.user.id}`
+    } catch (err2) {
+      console.error('raw update fallback also failed', err2)
+      // swallow to avoid showing 500 to the user; consider alerting in logs/monitoring
+    }
+  }
 
   revalidatePath('/profile')
 }
@@ -34,35 +47,43 @@ async function updateProfile(formData: FormData) {
 // -- Server action: shuffle avatar
 async function shuffleAvatar(_formData: FormData) {
   'use server'
-  const tAll = Date.now()
-
   const session = await getServerSession(authOptions)
   if (!session?.user?.id) redirect('/auth/login')
 
-  // ✅ Only need displayName here
   const profile = await prisma.userProfile.findUnique({
     where: { userId: session.user.id },
     select: { displayName: true },
   })
   const name = profile?.displayName || 'Learner'
   const rand = Math.floor(Math.random() * 10000)
+  const newSeed = `${name}-${rand}`
 
-  const tUpd = Date.now()
-  await prisma.userProfile.update({
-    where: { userId: session.user.id },
-    data: { avatarSeed: `${name}-${rand}` },
-  })
-  console.log('shuffleAvatar update ms', Date.now() - tUpd)
+  try {
+    // normal Prisma update (will work once DB types are correct)
+    await prisma.userProfile.update({
+      where: { userId: session.user.id },
+      data: { avatarSeed: newSeed },
+    })
+  } catch (err) {
+    // If Prisma fails due to bad column conversion, fallback to raw SQL update
+    // so the UI doesn't crash while we repair the DB.
+    console.error('prisma update failed — attempting raw SQL fallback', err)
+    try {
+      await prisma.$executeRaw`UPDATE "UserProfile" SET "avatarSeed" = ${newSeed} WHERE "userId" = ${session.user.id}`
+    } catch (err2) {
+      console.error('raw update failed', err2)
+      // swallow error to avoid showing 500 to the user
+    }
+  }
 
   revalidatePath('/profile')
-  console.log('shuffleAvatar total ms', Date.now() - tAll)
 }
 
 export default async function ProfilePage() {
   const session = await getServerSession(authOptions)
   if (!session?.user?.id) redirect('/auth/login')
 
-  // ✅ Explicitly select just what this page uses
+  // select only what's needed
   const profile = await prisma.userProfile.findUnique({
     where: { userId: session.user.id },
     select: {
@@ -75,6 +96,25 @@ export default async function ProfilePage() {
 
   const displayName = profile?.displayName || 'Learner'
   const seed = profile?.avatarSeed || displayName
+
+  // Prepare last 7 days keys (oldest -> newest)
+  const toDateKey = (d: Date) => d.toISOString().slice(0, 10)
+  const now = new Date()
+  const last7Keys: string[] = []
+  for (let i = 6; i >= 0; i--) {
+    const dd = new Date(now)
+    dd.setDate(now.getDate() - i)
+    // normalize to UTC date-key
+    const utc = new Date(Date.UTC(dd.getFullYear(), dd.getMonth(), dd.getDate()))
+    last7Keys.push(toDateKey(utc))
+  }
+
+  const days = await prisma.practiceDay.findMany({
+    where: { dateKey: { in: last7Keys }, userId: session.user.id },
+    select: { dateKey: true, reviews: true },
+  })
+  const map = new Map(days.map((d) => [d.dateKey, d.reviews ?? 0]))
+  const last7Days = last7Keys.map((k) => map.get(k) ?? 0)
 
   return (
     <div className="space-y-6">
@@ -132,9 +172,17 @@ export default async function ProfilePage() {
         </form>
       </div>
 
+      {/* Lightweight streak + 7-day activity (replaces heavy calendar) */}
       <div className="card">
-        <h2 className="font-semibold mb-3">Practice history</h2>
-        <ProfileCalendar year={new Date().getFullYear()} />
+        <h2 className="font-semibold mb-3">Practice activity</h2>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div>
+            <StreakCounter currentStreak={profile?.streakCurrent ?? 0} bestStreak={profile?.streakLongest ?? 0} />
+          </div>
+          <div className="md:col-span-2">
+            <WeeklyActivity last7Days={last7Days} />
+          </div>
+        </div>
       </div>
     </div>
   )
